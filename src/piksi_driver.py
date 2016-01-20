@@ -147,7 +147,7 @@ COV_NOT_MEASURED = 1000.0
 class PiksiROS(object):
     def __init__(self):
 
-        rospy.init_node("piksi_ros", anonymous=True)
+        rospy.init_node("piksi_ros")
 
         self.send_observations = False
         self.serial_number = None
