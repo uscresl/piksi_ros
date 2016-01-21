@@ -29,11 +29,13 @@ from diagnostic_msgs.msg import DiagnosticStatus
 from sbp.client.drivers.base_driver import BaseDriver
 from sbp.client.drivers.pyserial_driver import PySerialDriver
 from sbp.client import Handler, Framer
+from sbp.client.loggers.rotating_logger import RotatingFileLogger
 
 # Import SBP message ids
 from sbp.system import SBP_MSG_HEARTBEAT
 from sbp.observation import SBP_MSG_OBS, SBP_MSG_BASE_POS
 from sbp.navigation import SBP_MSG_GPS_TIME, SBP_MSG_BASELINE_NED, SBP_MSG_VEL_NED, SBP_MSG_POS_LLH, SBP_MSG_DOPS
+from sbp.logging import SBP_MSG_LOG
 
 # Import other libraries
 from pyproj import Proj
@@ -137,6 +139,16 @@ WEEK_SECONDS = 60*60*24*7
 def ros_time_from_sbp_time(msg):
     return rospy.Time(GPS_EPOCH + msg.wn*WEEK_SECONDS + msg.tow * 1E-3 + msg.ns * 1E-9)
 
+PIKSI_LOG_LEVELS_TO_ROS = {
+    0: rospy.logfatal,
+    1: rospy.logalert,
+    2: rospy.logcrit,
+    3: rospy.logerr,
+    4: rospy.logwarn,
+    5: rospy.loginfo,
+    6: rospy.loginfo,
+    7: rospy.logdebug
+}
 FIX_MODE = {0: "Single Point Positioning [0]", 1: "Fixed RTK [1]", 2: "Float RTK [2]", -1: "No fix"}
 HEIGHT_MODE = {0: "Height above WGS84 ellipsoid [0]", 1: "Height above mean sea level [1]"}
 RAIM_AVAILABILITY = {0: "Disabled/unavailable [0]", 1: "Available [1]"}
@@ -157,6 +169,11 @@ class PiksiROS(object):
         self.last_pos = None
         self.last_dops = None
         self.last_rtk_pos = None
+
+        self.last_spp_time = None
+        self.last_rtk_time = None
+
+        self.fix_mode = -1
 
         self.proj = None
 
@@ -230,6 +247,11 @@ class PiksiROS(object):
         self.rtk_h_accuracy = rospy.get_param("~rtk_h_accuracy", 0.04)
         self.rtk_v_accuracy = rospy.get_param("~rtk_h_accuracy", self.rtk_h_accuracy*3)
 
+        self.sbp_log = rospy.get_param('~sbp_log_file', None)
+
+        self.rtk_fix_timeout = rospy.get_param('~rtk_fix_timeout', 0.2)
+        self.spp_fix_timeout = rospy.get_param('~spp_fix_timeout', 1.0)
+
     def setup_comms(self):
         self.obs_senders = []
         self.obs_receivers = []
@@ -290,6 +312,12 @@ class PiksiROS(object):
         #if self.send_observations:
         self.piksi.add_callback(self.callback_sbp_obs, msg_type=SBP_MSG_OBS)
         self.piksi.add_callback(self.callback_sbp_base_pos, msg_type=SBP_MSG_BASE_POS)
+
+        self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
+
+        if self.sbp_log is not None:
+            self.sbp_logger = RotatingFileLogger(self.sbp_log, when='M', interval=60, backupCount=0)
+            self.piksi.add_callback(self.sbp_logger)
 
         self.piksi.start()
 
@@ -464,21 +492,13 @@ class PiksiROS(object):
             self.transform.translation.z = -msg.height
             self.tf_br.sendTransform(self.transform)
 
-    def fix_mode(self):
-        # Check how old messages are
+    def callback_sbp_log(self, msg, **metadata):
+        PIKSI_LOG_LEVELS_TO_ROS[msg.level]("Piksi LOG: %s" % msg.text)
 
-        d = None
-        if self.last_rtk_pos is not None:
-            d = self.last_rtk_pos
-        elif self.last_pos is not None:
-            d = self.last_pos
-        elif self.last_baseline is not None:
-            d = self.last_baseline
-
-        if d:
-            return d.flags & 0x03
-        else:
-            return -1
+    def check_timeouts(self):
+        # checks if rtk fix is timed out, switches to spp
+        # checks if spp fix is timed out, switches to nofix
+        pass
 
     def diag(self, stat):
         fix_mode = self.fix_mode()
@@ -501,7 +521,7 @@ class PiksiROS(object):
             stat.add("RAIM availability", RAIM_AVAILABILITY[(last_pos.n_sats & 0x08) >> 3])
             stat.add("RAIM repair", RAIM_REPAIR[(last_pos.n_sats & 0x10) >> 4])
 
-        stat.add("Fix mode", FIX_MODE[self.fix_mode()])
+        stat.add("Fix mode", FIX_MODE[self.fix_mode])
 
         if self.last_vel:
             stat.add("Velocity N", self.last_vel.n * 1E-3)
@@ -542,10 +562,11 @@ class PiksiROS(object):
                 self.connect_piksi()
 
                 while not rospy.is_shutdown():
-                    rospy.sleep(1.0)
+                    rospy.sleep(0.05)
                     if not self.piksi.is_alive():
                         raise IOError
                     self.diag_updater.update()
+                    self.check_timeouts()
 
                 break # should only happen if rospy is trying to shut down
             except IOError as e:
