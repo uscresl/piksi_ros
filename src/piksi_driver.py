@@ -25,6 +25,8 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped
 from diagnostic_msgs.msg import DiagnosticStatus
 
+from piksi_ros.msg import Observations, Obs, Ephemeris
+
 # Import SBP libraries
 from sbp.client.drivers.base_driver import BaseDriver
 from sbp.client.drivers.pyserial_driver import PySerialDriver
@@ -32,10 +34,11 @@ from sbp.client import Handler, Framer
 from sbp.client.loggers.rotating_logger import RotatingFileLogger
 
 # Import SBP message ids
-from sbp.system import SBP_MSG_HEARTBEAT
-from sbp.observation import SBP_MSG_OBS, SBP_MSG_BASE_POS
+from sbp.system import SBP_MSG_HEARTBEAT, SBP_MSG_STARTUP
+from sbp.observation import SBP_MSG_OBS, SBP_MSG_BASE_POS, SBP_MSG_EPHEMERIS
 from sbp.navigation import SBP_MSG_GPS_TIME, SBP_MSG_BASELINE_NED, SBP_MSG_VEL_NED, SBP_MSG_POS_LLH, SBP_MSG_DOPS
 from sbp.logging import SBP_MSG_LOG
+from sbp.settings import *
 
 # Import other libraries
 from pyproj import Proj
@@ -141,8 +144,8 @@ def ros_time_from_sbp_time(msg):
 
 PIKSI_LOG_LEVELS_TO_ROS = {
     0: rospy.logfatal,
-    1: rospy.logalert,
-    2: rospy.logcrit,
+    1: rospy.logerr,
+    2: rospy.logerr,
     3: rospy.logerr,
     4: rospy.logwarn,
     5: rospy.loginfo,
@@ -252,6 +255,9 @@ class PiksiROS(object):
         self.rtk_fix_timeout = rospy.get_param('~rtk_fix_timeout', 0.2)
         self.spp_fix_timeout = rospy.get_param('~spp_fix_timeout', 1.0)
 
+        self.publish_ephemeris = rospy.get_param('~publish_ephemeris', False)
+        self.publish_observations = rospy.get_param('~publish_observations', False)
+
     def setup_comms(self):
         self.obs_senders = []
         self.obs_receivers = []
@@ -295,6 +301,12 @@ class PiksiROS(object):
         if self.publish_tf:
             self.tf_br = tf2_ros.TransformBroadcaster()
 
+        if self.publish_ephemeris:
+            self.pub_eph = rospy.Publisher("~ephemeris", Ephemeris, queue_size=1000)
+
+        if self.publish_observations:
+            self.pub_obs = rospy.Publisher('~observations', Observations, queue_size=1000)
+
 
     def connect_piksi(self):
         self.piksi_driver = PySerialDriver(self.piksi_port, baud=1000000)
@@ -312,8 +324,17 @@ class PiksiROS(object):
         #if self.send_observations:
         self.piksi.add_callback(self.callback_sbp_obs, msg_type=SBP_MSG_OBS)
         self.piksi.add_callback(self.callback_sbp_base_pos, msg_type=SBP_MSG_BASE_POS)
+        self.piksi.add_callback(self.callback_sbp_ephemeris, msg_type=SBP_MSG_EPHEMERIS)
 
         self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
+        self.piksi.add_callback(self.callback_sbp_settings_read_resp, msg_type=SBP_MSG_SETTINGS_READ_RESP)
+        self.piksi.add_callback(self.callback_sbp_settings_read_by_index_resp, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_REQ)
+        self.piksi.add_callback(self.callback_sbp_settings_read_by_index_resp, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_RESP)
+        self.piksi.add_callback(self.callback_sbp_settings_read_by_index_done, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_DONE)
+        # self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
+        # self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
+
+        self.piksi.add_callback(self.callback_sbp_startup, SBP_MSG_STARTUP)
 
         if self.sbp_log is not None:
             self.sbp_logger = RotatingFileLogger(self.sbp_log, when='M', interval=60, backupCount=0)
@@ -336,6 +357,20 @@ class PiksiROS(object):
         self.serial_number = serial_number
         self.diag_updater.setHardwareID("Piksi %d" % serial_number)
 
+    def read_piksi_settings(self):
+        self.settings_index = 0
+        self.piksi_framer(MsgSettingsReadByIndexReq(index=self.settings_index))
+        #self.piksi_framer(MsgSettingsReadReq(setting='simulator\0enabled\0'))
+
+    def set_piksi_settings(self):
+
+        if self.piksi_simulation:
+        else:
+            pass
+
+    def callback_sbp_startup(self, msg, **metadata):
+        print msg
+
     def callback_sbp_gps_time(self, msg, **metadata):
         if self.debug:
             rospy.loginfo("Received SBP_MSG_GPS_TIME (Sender: %d): %s" % (msg.sender, repr(msg)))
@@ -354,6 +389,7 @@ class PiksiROS(object):
         self.heartbeat_diag.tick()
         if self.serial_number is None:
             self.set_serial_number(msg.sender)
+            self.read_piksi_settings()
 
 
     def callback_sbp_dops(self, msg, **metadata):
@@ -461,6 +497,11 @@ class PiksiROS(object):
         #
         # self.pub_rtk.publish(out)
 
+    def callback_sbp_ephemeris(self, msg, **metadata):
+        m = Ephemeris()
+        print msg
+        self.pub_eph.publish(m)
+
     def callback_sbp_obs(self, msg, **metadata):
         if self.debug:
             rospy.loginfo("Received SBP_MSG_OBS (Sender: %d): %s" % (msg.sender, repr(msg)))
@@ -468,6 +509,13 @@ class PiksiROS(object):
         if self.send_observations:
             for s in self.obs_senders:
                 s.send(msg)
+
+        if self.publish_observations:
+            m = Observations()
+            m.header.stamp = rospy.Time.now()
+            m.header.frame_id = self.frame_id
+            print msg
+            self.pub_obs.publish(m)
 
 
     def callback_sbp_base_pos(self, msg, **metadata):
@@ -492,6 +540,17 @@ class PiksiROS(object):
             self.transform.translation.z = -msg.height
             self.tf_br.sendTransform(self.transform)
 
+    def callback_sbp_settings_read_resp(self, msg, **metadata):
+        print msg
+
+    def callback_sbp_settings_read_by_index_resp(self, msg, **metadata):
+        print msg
+        self.settings_index += 1
+        self.piksi_framer(MsgSettingsReadByIndexReq(index=self.settings_index))
+
+    def callback_sbp_settings_read_by_index_done(self, msg, **metadata):
+        print msg
+
     def callback_sbp_log(self, msg, **metadata):
         PIKSI_LOG_LEVELS_TO_ROS[msg.level]("Piksi LOG: %s" % msg.text)
 
@@ -501,7 +560,7 @@ class PiksiROS(object):
         pass
 
     def diag(self, stat):
-        fix_mode = self.fix_mode()
+        fix_mode = self.fix_mode
         num_sats = 0
         last_pos = None
 
