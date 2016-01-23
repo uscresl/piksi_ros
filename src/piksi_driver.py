@@ -10,7 +10,7 @@ import time
 import sys
 import socket
 import threading
-from collections import deque
+from collections import deque, defaultdict
 
 # Import ROS libraries
 import rospy
@@ -42,6 +42,8 @@ from sbp.settings import *
 
 # Import other libraries
 from pyproj import Proj
+
+tree = lambda: defaultdict(tree)
 
 def calculate_utm_zone(lat, lon):
     """ Determine the UTM zone that a lon-lat point falls in. Returns and
@@ -142,6 +144,15 @@ WEEK_SECONDS = 60*60*24*7
 def ros_time_from_sbp_time(msg):
     return rospy.Time(GPS_EPOCH + msg.wn*WEEK_SECONDS + msg.tow * 1E-3 + msg.ns * 1E-9)
 
+def nested_dict_iter(d,res=[],parents=()):
+    for k,v in d.iteritems():
+        if isinstance(v, dict):
+            nested_dict_iter(v, res, parents+(k,))
+        else:
+            res.append((parents+(k,), v))
+    return res
+
+# Maps piksi error levels to ROS logging functions
 PIKSI_LOG_LEVELS_TO_ROS = {
     0: rospy.logfatal,
     1: rospy.logerr,
@@ -152,11 +163,14 @@ PIKSI_LOG_LEVELS_TO_ROS = {
     6: rospy.loginfo,
     7: rospy.logdebug
 }
+
+# Description text for some piksi flags
 FIX_MODE = {0: "Single Point Positioning [0]", 1: "Fixed RTK [1]", 2: "Float RTK [2]", -1: "No fix"}
 HEIGHT_MODE = {0: "Height above WGS84 ellipsoid [0]", 1: "Height above mean sea level [1]"}
 RAIM_AVAILABILITY = {0: "Disabled/unavailable [0]", 1: "Available [1]"}
 RAIM_REPAIR = {0: "No repair [0]", 1: "Solution from RAIM repair [1]"}
 
+# Covariance for non-observed quantities
 COV_NOT_MEASURED = 1000.0
 
 class PiksiROS(object):
@@ -173,10 +187,12 @@ class PiksiROS(object):
         self.last_dops = None
         self.last_rtk_pos = None
 
-        self.last_spp_time = None
-        self.last_rtk_time = None
-
+        self.last_spp_time = 0
+        self.last_rtk_time = 0
         self.fix_mode = -1
+        self.rtk_fix_mode = 2
+
+        self.piksi_settings = tree()
 
         self.proj = None
 
@@ -258,6 +274,9 @@ class PiksiROS(object):
         self.publish_ephemeris = rospy.get_param('~publish_ephemeris', False)
         self.publish_observations = rospy.get_param('~publish_observations', False)
 
+        self.piksi_update_settings = rospy.get_param('~piksi',{})
+        self.piksi_save_settings = rospy.get_param('~piksi_save_settings', False)
+
     def setup_comms(self):
         self.obs_senders = []
         self.obs_receivers = []
@@ -308,12 +327,7 @@ class PiksiROS(object):
             self.pub_obs = rospy.Publisher('~observations', Observations, queue_size=1000)
 
 
-    def connect_piksi(self):
-        self.piksi_driver = PySerialDriver(self.piksi_port, baud=1000000)
-        self.piksi_framer = Framer(self.piksi_driver.read, self.piksi_driver.write, verbose=False)
-        self.piksi = Handler(self.piksi_framer)
-
-        self.piksi.add_callback(self.callback_sbp_heartbeat, msg_type=SBP_MSG_HEARTBEAT)
+    def piksi_start(self):
         self.piksi.add_callback(self.callback_sbp_gps_time, msg_type=SBP_MSG_GPS_TIME)
         self.piksi.add_callback(self.callback_sbp_dops, msg_type=SBP_MSG_DOPS)
 
@@ -326,6 +340,18 @@ class PiksiROS(object):
         self.piksi.add_callback(self.callback_sbp_base_pos, msg_type=SBP_MSG_BASE_POS)
         self.piksi.add_callback(self.callback_sbp_ephemeris, msg_type=SBP_MSG_EPHEMERIS)
 
+        if self.sbp_log is not None:
+            self.sbp_logger = RotatingFileLogger(self.sbp_log, when='M', interval=60, backupCount=0)
+            self.piksi.add_callback(self.sbp_logger)
+
+    def connect_piksi(self):
+        self.piksi_driver = PySerialDriver(self.piksi_port, baud=1000000)
+        self.piksi_framer = Framer(self.piksi_driver.read, self.piksi_driver.write, verbose=False)
+        self.piksi = Handler(self.piksi_framer)
+
+        # Only setup log and settings messages
+        # We will wait to set up rest until piksi is configured
+        self.piksi.add_callback(self.callback_sbp_heartbeat, msg_type=SBP_MSG_HEARTBEAT)
         self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
         self.piksi.add_callback(self.callback_sbp_settings_read_resp, msg_type=SBP_MSG_SETTINGS_READ_RESP)
         self.piksi.add_callback(self.callback_sbp_settings_read_by_index_resp, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_REQ)
@@ -335,10 +361,6 @@ class PiksiROS(object):
         # self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
 
         self.piksi.add_callback(self.callback_sbp_startup, SBP_MSG_STARTUP)
-
-        if self.sbp_log is not None:
-            self.sbp_logger = RotatingFileLogger(self.sbp_log, when='M', interval=60, backupCount=0)
-            self.piksi.add_callback(self.sbp_logger)
 
         self.piksi.start()
 
@@ -363,10 +385,25 @@ class PiksiROS(object):
         #self.piksi_framer(MsgSettingsReadReq(setting='simulator\0enabled\0'))
 
     def set_piksi_settings(self):
+        save_needed = False
+        for s in nested_dict_iter(self.piksi_update_settings):
+            cval = self.piksi_settings[s[0][0]][s[0][1]]
+            if len(cval) != 0:
+                if cval != str(s[1]):
+                    rospy.loginfo('Updating piksi setting %s:%s to %s.' % (s[0][0], s[0][1], s[1]))
+                    m = MsgSettingsWrite(setting="%s\0%s\0%s\0" % (s[0][0], s[0][1], s[1]))
+                    print m
+                    self.piksi_framer(m)
+                    save_needed = True
+                else:
+                    rospy.loginfo('Piksi setting %s:%s already set to %s.' % (s[0][0], s[0][1], s[1]))
+            else:
+                print 'Invalid piksi setting'
+                print s
 
-        if self.piksi_simulation:
-        else:
-            pass
+        if self.piksi_save_settings and save_needed:
+            m = MsgSettingsSave()
+            self.piksi_framer(m)
 
     def callback_sbp_startup(self, msg, **metadata):
         print msg
@@ -414,6 +451,9 @@ class PiksiROS(object):
         out.altitude = msg.height
 
         if msg.flags & 0x03:
+            self.last_rtk_time = time.time()
+            self.rtk_fix_mode = msg.flags & 0x03
+
             out.status.status = NavSatStatus.STATUS_GBAS_FIX
 
             # TODO this should probably also include covariance of base fix?
@@ -424,6 +464,9 @@ class PiksiROS(object):
             pub = self.pub_rtk_fix
             self.last_rtk_pos = msg
         else:
+
+            self.last_spp_time = time.time()
+
             out.status.status = NavSatStatus.STATUS_FIX
 
             # TODO hack, piksi should provide these numbers
@@ -543,18 +586,28 @@ class PiksiROS(object):
     def callback_sbp_settings_read_resp(self, msg, **metadata):
         print msg
 
+
     def callback_sbp_settings_read_by_index_resp(self, msg, **metadata):
-        print msg
+        p = msg.setting.split('\0')
+        self.piksi_settings[p[0]][p[1]] = p[2]
         self.settings_index += 1
         self.piksi_framer(MsgSettingsReadByIndexReq(index=self.settings_index))
 
     def callback_sbp_settings_read_by_index_done(self, msg, **metadata):
-        print msg
+        self.set_piksi_settings()
+        self.piksi_start()
 
     def callback_sbp_log(self, msg, **metadata):
         PIKSI_LOG_LEVELS_TO_ROS[msg.level]("Piksi LOG: %s" % msg.text)
 
     def check_timeouts(self):
+        if time.time() - self.last_rtk_time > self.rtk_fix_timeout:
+            if time.time() - self.last_spp_time > self.spp_fix_timeout:
+                self.fix_mode = -1
+            else:
+                self.fix_mode = 0
+        else:
+            self.fix_mode = self.rtk_fix_mode
         # checks if rtk fix is timed out, switches to spp
         # checks if spp fix is timed out, switches to nofix
         pass
