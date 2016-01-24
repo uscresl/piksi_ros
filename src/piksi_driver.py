@@ -130,13 +130,26 @@ class UDPReceiver(object):
 
 class SerialSender(object):
     def __init__(self, port, baud_rate):
-        raise NotImplemented
+        import serial
+        self.serial = serial.serial_for_url(port)
+        self.serial.baudrate = baud
+        self.serial.timeout = 1
+
+
     def send(self, msg, **metadata):
-        raise NotImplemented
+        self.serial.write(msg.pack())
 
 class SerialReceiver(object):
     def __init__(self, port, baud_rate, callback):
-        raise NotImplemented
+        self._callback = callback
+        self.driver = PySerialDriver(port, baud=baud_rate)
+        self.framer = Framer(self.driver.read, None, verbose=False)
+        self.piksi = Handler(self.framer)
+        self.piksi.add_callback(self.callback)
+        self.piksi.start()
+
+    def callback(self, msg, **metadata):
+        self._callback(msg, **metadata)
 
 GPS_EPOCH = time.mktime((1980, 1, 6, 0, 0, 0, 0, 0, 0))
 WEEK_SECONDS = 60*60*24*7
