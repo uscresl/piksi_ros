@@ -370,8 +370,6 @@ class PiksiROS(object):
         self.piksi.add_callback(self.callback_sbp_settings_read_by_index_resp, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_REQ)
         self.piksi.add_callback(self.callback_sbp_settings_read_by_index_resp, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_RESP)
         self.piksi.add_callback(self.callback_sbp_settings_read_by_index_done, msg_type=SBP_MSG_SETTINGS_READ_BY_INDEX_DONE)
-        # self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
-        # self.piksi.add_callback(self.callback_sbp_log, msg_type=SBP_MSG_LOG)
 
         self.piksi.add_callback(self.callback_sbp_startup, SBP_MSG_STARTUP)
 
@@ -405,21 +403,20 @@ class PiksiROS(object):
                 if cval != str(s[1]):
                     rospy.loginfo('Updating piksi setting %s:%s to %s.' % (s[0][0], s[0][1], s[1]))
                     m = MsgSettingsWrite(setting="%s\0%s\0%s\0" % (s[0][0], s[0][1], s[1]))
-                    print m
                     self.piksi_framer(m)
                     save_needed = True
                 else:
                     rospy.loginfo('Piksi setting %s:%s already set to %s.' % (s[0][0], s[0][1], s[1]))
             else:
-                print 'Invalid piksi setting'
-                print s
+                rospy.logwarn('Invalid piksi setting: %s' % ':'.join(s[0]))
 
         if self.piksi_save_settings and save_needed:
+            rospy.loginfo('Saving piksi settings to flash')
             m = MsgSettingsSave()
             self.piksi_framer(m)
 
     def callback_sbp_startup(self, msg, **metadata):
-        print msg
+        rospy.loginfo('Piksi startup packet received: %s' % repr(msg))
 
     def callback_sbp_gps_time(self, msg, **metadata):
         if self.debug:
@@ -521,41 +518,16 @@ class PiksiROS(object):
             rospy.loginfo("Received SBP_MSG_VEL_NED (Sender: %d): %s" % (msg.sender, repr(msg)))
         self.last_vel = msg
         self.publish_odom()
-        return
-
-        # out = Odometry()
-        # out.header.frame_id = self.frame_id
-        # out.header.stamp = rospy.Time.now()
-        # out.child_frame_id = self.child_frame_id
-        #
-        # out.twist.twist.linear.x = msg.e/1000.0
-        # out.twist.twist.linear.y = msg.n/1000.0
-        # out.twist.twist.linear.z = -msg.d/1000.0
-        #
-        # self.pub_odom.publish(out)
-
 
     def callback_sbp_baseline(self, msg, **metadata):
         if self.debug:
             rospy.loginfo("Received SBP_MSG_BASELINE_NED (Sender: %d): %s" % (msg.sender, repr(msg)))
         self.last_baseline = msg
         self.publish_odom()
-        return
-
-        # out = Odometry()
-        # out.header.frame_id = self.frame_id
-        # out.header.stamp = rospy.Time.now()
-        # out.child_frame_id = self.child_frame_id
-        #
-        # out.pose.pose.position.x = msg.e/1000.0
-        # out.pose.pose.position.y = msg.n/1000.0
-        # out.pose.pose.position.z = -msg.d/1000.0
-        #
-        # self.pub_rtk.publish(out)
 
     def callback_sbp_ephemeris(self, msg, **metadata):
+        # TODO fill out message
         m = Ephemeris()
-        print msg
         self.pub_eph.publish(m)
 
     def callback_sbp_obs(self, msg, **metadata):
@@ -570,12 +542,13 @@ class PiksiROS(object):
             m = Observations()
             m.header.stamp = rospy.Time.now()
             m.header.frame_id = self.frame_id
-            print msg
+
+            # TODO fill out message
             self.pub_obs.publish(m)
 
 
     def callback_sbp_base_pos(self, msg, **metadata):
-        print msg
+
         if self.debug:
             rospy.loginfo("Received SBP_MSG_BASE_POS (Sender: %d): %s" % (msg.sender, repr(msg)))
 
@@ -597,7 +570,7 @@ class PiksiROS(object):
             self.tf_br.sendTransform(self.transform)
 
     def callback_sbp_settings_read_resp(self, msg, **metadata):
-        print msg
+        pass
 
 
     def callback_sbp_settings_read_by_index_resp(self, msg, **metadata):
@@ -621,9 +594,6 @@ class PiksiROS(object):
                 self.fix_mode = 0
         else:
             self.fix_mode = self.rtk_fix_mode
-        # checks if rtk fix is timed out, switches to spp
-        # checks if spp fix is timed out, switches to nofix
-        pass
 
     def diag(self, stat):
         fix_mode = self.fix_mode
@@ -702,7 +672,7 @@ class PiksiROS(object):
                 self.disconnect_piksi()
             except: # catch *all* exceptions
                 e = sys.exc_info()[0]
-                print e
+                rospy.logerr("Uncaught error: %s" % repr(e))
                 self.disconnect_piksi()
             rospy.loginfo("Attempting to reconnect in %fs" % reconnect_delay)
             rospy.sleep(reconnect_delay)
