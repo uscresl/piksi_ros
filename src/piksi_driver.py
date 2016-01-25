@@ -22,7 +22,7 @@ import tf2_ros
 # Import ROS messages
 from sensor_msgs.msg import NavSatFix, TimeReference, NavSatStatus
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Quaternion
 from diagnostic_msgs.msg import DiagnosticStatus
 
 from piksi_ros.msg import Observations, Obs, Ephemeris
@@ -235,7 +235,14 @@ class PiksiROS(object):
 
         self.transform = TransformStamped()
         self.transform.header.frame_id = self.utm_frame_id
-        self.transform.header.frame_id = self.rtk_frame_id
+        self.transform.child_frame_id = self.rtk_frame_id
+        self.transform.transform.rotation = Quaternion(x=0,y=0,z=0,w=1)
+
+        # Used to publish transform from rtk_frame_id -> child_frame_id
+        self.base_link_transform = TransformStamped()
+        self.base_link_transform.header.frame_id = self.rtk_frame_id
+        self.base_link_transform.child_frame_id = self.child_frame_id
+        self.base_link_transform.transform.rotation = Quaternion(x=0,y=0,z=0,w=1)
 
         self.diag_updater = diagnostic_updater.Updater()
         self.heartbeat_diag = diagnostic_updater.FrequencyStatus(diagnostic_updater.FrequencyStatusParam({'min':self.diag_heartbeat_freq, 'max':self.diag_heartbeat_freq}, self.diag_freq_tolerance, self.diag_window_size))
@@ -255,7 +262,8 @@ class PiksiROS(object):
         self.child_frame_id = rospy.get_param('~child_frame_id', "base_link")
         self.piksi_port = rospy.get_param('~port', "/dev/ttyUSB0")
 
-        self.publish_tf = rospy.get_param('~publish_tf', False)
+        self.publish_utm_rtk_tf = rospy.get_param('~publish_utm_rtk_tf', False)
+        self.publish_rtk_child_tf = rospy.get_param('~publish_rtk_child_tf', False)
 
         self.diag_heartbeat_freq = rospy.get_param('~diag/heartbeat_freq', 1.0)
         self.diag_update_freq = rospy.get_param('~diag/update_freq', 10.0)
@@ -330,7 +338,7 @@ class PiksiROS(object):
         self.pub_odom = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~odom", Odometry, queue_size=1000), self.diag_updater, freq_params, time_params)
         self.pub_time = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~time", TimeReference, queue_size=1000), self.diag_updater, freq_params, time_params)
 
-        if self.publish_tf:
+        if self.publish_utm_rtk_tf or self.publish_rtk_child_tf:
             self.tf_br = tf2_ros.TransformBroadcaster()
 
         if self.publish_ephemeris:
@@ -522,12 +530,57 @@ class PiksiROS(object):
     def callback_sbp_baseline(self, msg, **metadata):
         if self.debug:
             rospy.loginfo("Received SBP_MSG_BASELINE_NED (Sender: %d): %s" % (msg.sender, repr(msg)))
+
+        if self.publish_rtk_child_tf:
+            self.base_link_transform.header.stamp = rospy.Time.now()
+            self.base_link_transform.transform.translation.x = msg.e/1000.0
+            self.base_link_transform.transform.translation.y = msg.n/1000.0
+            self.base_link_transform.transform.translation.z = -msg.d/1000.0
+            self.tf_br.sendTransform(self.base_link_transform)
+
         self.last_baseline = msg
         self.publish_odom()
 
     def callback_sbp_ephemeris(self, msg, **metadata):
-        # TODO fill out message
-        m = Ephemeris()
+        if self.debug:
+            rospy.loginfo("Received SBP_MSG_EPHEMERIS (Sender: %d): %s" % (msg.sender, repr(msg)))
+
+        if not hasattr(self, 'eph_msg'):
+            self.eph_msg = Ephemeris()
+        self.eph_msg.header.stamp = rospy.Time.now()
+        self.eph_msg.header.frame_id = self.frame_id
+
+        self.eph_msg.tgd = msg.tgd
+        self.eph_msg.c_rs = msg.c_rs
+        self.eph_msg.c_rc = msg.c_rc
+        self.eph_msg.c_uc = msg.c_uc
+        self.eph_msg.c_us = msg.c_us
+        self.eph_msg.c_ic = msg.c_ic
+        self.eph_msg.c_is = msg.c_is
+        self.eph_msg.dn = msg.dn
+        self.eph_msg.m0 = msg.m0
+        self.eph_msg.ecc = msg.ecc
+        self.eph_msg.sqrta = msg.sqrta
+        self.eph_msg.omega0 = msg.omega0
+        self.eph_msg.omegadot = msg.omegadot
+        self.eph_msg.w = msg.w
+        self.eph_msg.inc = msg.inc
+        self.eph_msg.inc_dot = msg.inc_dot
+        self.eph_msg.af0 = msg.af0
+        self.eph_msg.af1 = msg.af1
+        self.eph_msg.af2 = msg.af2
+        self.eph_msg.toe_tow = msg.toe_tow
+        self.eph_msg.toe_wn = msg.toe_wn
+        self.eph_msg.toc_tow = msg.toc_tow
+        self.eph_msg.toc_wn = msg.toc_wn
+        self.eph_msg.valid = msg.valid
+        self.eph_msg.healthy = msg.healthy
+        self.eph_msg.sid.sat = msg.sid.sat
+        self.eph_msg.sid.band = msg.sid.band
+        self.eph_msg.sid.constellation = msg.sid.constellation
+        self.eph_msg.iode = msg.iode
+        self.eph_msg.iodc = msg.iodc
+
         self.pub_eph.publish(m)
 
     def callback_sbp_obs(self, msg, **metadata):
@@ -539,12 +592,44 @@ class PiksiROS(object):
                 s.send(msg)
 
         if self.publish_observations:
-            m = Observations()
-            m.header.stamp = rospy.Time.now()
-            m.header.frame_id = self.frame_id
+            if not hasattr(self, 'obs_msg'):
+                self.obs_msg = Observations()
 
-            # TODO fill out message
-            self.pub_obs.publish(m)
+            # Need to do some accounting to figure out how many sbp packets to expect
+            num_packets = (msg.header.n_obs >> 4) & 0x0F
+            packet_no = msg.header.n_obs & 0x0F
+
+            if self.obs_msg.tow != msg.header.t.tow:
+
+                self.obs_msg.header.stamp = rospy.Time.now()
+                self.obs_msg.header.frame_id = self.frame_id
+
+                self.obs_msg.tow = msg.header.t.tow
+                self.obs_msg.wn = msg.header.t.wn
+                self.obs_msg.n_obs = 0
+
+                self.obs_msg.obs = []
+
+            # lets use this field to count how many packets we have so far
+            self.obs_msg.n_obs += 1
+
+            for obs in msg.obs:
+                x = Obs()
+                x.P = obs.P
+                x.L.i = obs.L.i
+                x.L.f = obs.L.f
+                x.cn0 = obs.cn0
+                x.lock = obs.lock
+                x.sid.sat = obs.sid.sat
+                x.sid.band = obs.sid.band
+                x.sid.constellation = obs.sid.constellation
+                self.obs_msg.obs.append(x)
+
+            if num_packets == self.obs_msg.n_obs:
+                # Now use the field to indicate how many observations we have
+                self.obs_msg.n_obs = len(self.obs_msg.obs)
+
+                self.pub_obs.publish(self.obs_msg)
 
 
     def callback_sbp_base_pos(self, msg, **metadata):
@@ -557,16 +642,16 @@ class PiksiROS(object):
                 s.send(msg)
 
         # publish tf for rtk frame
-        if self.publish_tf:
+        if self.publish_utm_rtk_tf:
             if not self.proj:
                 self.init_proj((msg.lat, msg.lon))
 
             E,N = self.proj(msg.lon,msg.lat, inverse=False)
 
             self.transform.header.stamp = rospy.Time.now()
-            self.transform.translation.x = E
-            self.transform.translation.y = N
-            self.transform.translation.z = -msg.height
+            self.transform.transform.translation.x = E
+            self.transform.transform.translation.y = N
+            self.transform.transform.translation.z = -msg.height
             self.tf_br.sendTransform(self.transform)
 
     def callback_sbp_settings_read_resp(self, msg, **metadata):
