@@ -285,7 +285,7 @@ class PiksiROS(object):
         self.obs_serial_baud_rate = rospy.get_param('~obs/serial/baud_rate', None)
 
         self.rtk_h_accuracy = rospy.get_param("~rtk_h_accuracy", 0.04)
-        self.rtk_v_accuracy = rospy.get_param("~rtk_h_accuracy", self.rtk_h_accuracy*3)
+        self.rtk_v_accuracy = rospy.get_param("~rtk_v_accuracy", self.rtk_h_accuracy*3)
 
         self.sbp_log = rospy.get_param('~sbp_log_file', None)
 
@@ -331,9 +331,11 @@ class PiksiROS(object):
         freq_params = diagnostic_updater.FrequencyStatusParam({'min':self.diag_update_freq, 'max':self.diag_update_freq}, self.diag_freq_tolerance, self.diag_window_size)
         time_params = diagnostic_updater.TimeStampStatusParam(self.diag_min_delay, self.diag_max_delay)
 
-        self.pub_fix = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~spp_fix", NavSatFix, queue_size=1000), self.diag_updater, freq_params, time_params)
+        self.pub_fix = rospy.Publisher("~fix", NavSatFix, queue_size=1000)
 
-        self.pub_rtk_fix = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~fix", NavSatFix, queue_size=1000), self.diag_updater, freq_params, time_params)
+        self.pub_spp_fix = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~spp_fix", NavSatFix, queue_size=1000), self.diag_updater, freq_params, time_params)
+
+        self.pub_rtk_fix = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~rtk_fix", NavSatFix, queue_size=1000), self.diag_updater, freq_params, time_params)
         #self.pub_rtk = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~rtk_odom", Odometry, queue_size=1000), self.diag_updater, freq_params, time_params)
         self.pub_odom = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~odom", Odometry, queue_size=1000), self.diag_updater, freq_params, time_params)
         self.pub_time = diagnostic_updater.DiagnosedPublisher(rospy.Publisher("~time", TimeReference, queue_size=1000), self.diag_updater, freq_params, time_params)
@@ -461,12 +463,13 @@ class PiksiROS(object):
         out.header.frame_id = self.frame_id
         out.header.stamp = rospy.Time.now()
 
-
         out.status.service = NavSatStatus.SERVICE_GPS
 
         out.latitude = msg.lat
         out.longitude = msg.lon
         out.altitude = msg.height
+
+        out.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
 
         if msg.flags & 0x03:
             self.last_rtk_time = time.time()
@@ -481,6 +484,9 @@ class PiksiROS(object):
 
             pub = self.pub_rtk_fix
             self.last_rtk_pos = msg
+
+            # If we are getting this message, RTK is our best fix, so publish this as our best fix.
+            self.pub_fix.publish(out)
         else:
 
             self.last_spp_time = time.time()
@@ -497,11 +503,13 @@ class PiksiROS(object):
                 out.position_covariance[4] = COV_NOT_MEASURED
                 out.position_covariance[8] = COV_NOT_MEASURED
 
-            pub = self.pub_fix
+            pub = self.pub_spp_fix
             self.last_pos = msg
 
-        #out.position_covariance
-        out.position_covariance_type = NavSatFix.COVARIANCE_TYPE_APPROXIMATED
+            # Check if SPP is currently our best available fix
+            if self.rtk_fix_mode <= 0:
+                self.pub_fix.publish(out)
+
         pub.publish(out)
 
     def publish_odom(self):
