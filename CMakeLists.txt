@@ -24,6 +24,7 @@ add_message_files(
    Obs.msg
    Observations.msg
    Sid.msg
+   SignalStatus.msg
 )
 
 generate_messages(
