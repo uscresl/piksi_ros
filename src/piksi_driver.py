@@ -3,7 +3,6 @@
 PKG = "piksi_ros"
 
 # TODO add rinex logging (copy from https://github.com/swift-nav/piksi_tools/blob/master/piksi_tools/console/observation_view.py)
-# TODO finish obs to/from serial port
 
 # Import system libraries
 import time
