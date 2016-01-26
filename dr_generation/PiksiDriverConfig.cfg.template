@@ -1,0 +1,27 @@
+#!/usr/bin/env python
+
+PACKAGE='piksi_ros'
+import roslib; roslib.load_manifest(PACKAGE)
+
+from dynamic_reconfigure.parameter_generator_catkin import *
+
+{{root_group}} = ParameterGenerator()
+
+{% for enum in enums %}
+{{ enum.name }} = {{root_group}}.enum([
+{% for field in enum.fields %}
+{{root_group}}.const("{{ field.name}}",      {{field.type}}, "{{field.value}}", "{{field.desc}}"),
+{% endfor %}],
+"{{ enum.desc }}")
+{% endfor %}
+
+
+{% for group in groups %}
+{{ group.name }} = {{group.parent}}.add_group("{{ group.name }}")
+{% endfor %}
+
+{% for param in params %}
+{{param.group}}.add("{{param.name}}",            {{param.type}},   {{param.level}}, "{{ param.desc}}", {{ param.default}}{% if param.enum_name %}, edit_method={{param.enum_name}}{% endif %})
+{% endfor %}
+
+exit(gen.generate(PACKAGE, "piksi_driver", "PiksiDriver"))

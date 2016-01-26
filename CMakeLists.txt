@@ -8,8 +8,13 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
   message_generation
+  dynamic_reconfigure
 )
 
+
+generate_dynamic_reconfigure_options(
+  cfg/PiksiDriverConfig.cfg
+)
 
 add_message_files(
    DIRECTORY msg
@@ -25,6 +30,7 @@ generate_messages(
    DEPENDENCIES
    std_msgs
 )
+
 
 ## Generate dynamic reconfigure parameters in the 'cfg' folder
 # generate_dynamic_reconfigure_options(
