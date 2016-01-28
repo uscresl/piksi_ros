@@ -379,7 +379,7 @@ class PiksiROS(object):
 
     def read_params(self):
         self.debug = rospy.get_param('~debug', False)
-        self.frame_id = rospy.get_param('~frame_id', "gps")
+        self.frame_id = rospy.get_param('~frame_id', "piksi")
         self.rtk_frame_id = rospy.get_param('~rtk_frame_id', "rtk_gps")
         self.utm_frame_id = rospy.get_param('~utm_frame_id', "utm")
         self.child_frame_id = rospy.get_param('~child_frame_id', "base_link")
@@ -405,7 +405,7 @@ class PiksiROS(object):
         self.obs_serial_send = rospy.get_param('~obs/serial/send', False)
         self.obs_serial_recv = rospy.get_param('~obs/serial/receive', False)
         self.obs_serial_port = rospy.get_param('~obs/serial/port', None)
-        self.obs_serial_baud_rate = rospy.get_param('~obs/serial/baud_rate', None)
+        self.obs_serial_baud_rate = rospy.get_param('~obs/serial/baud_rate', 115200)
 
         self.rtk_h_accuracy = rospy.get_param("~rtk_h_accuracy", 0.04)
         self.rtk_v_accuracy = rospy.get_param("~rtk_v_accuracy", self.rtk_h_accuracy*3)
@@ -810,8 +810,10 @@ class PiksiROS(object):
         except:
             pass
 
+        rospy.set_param('~piksi_original_settings/%s/%s' % (p[0],p[1]), p[2])
         self.piksi_settings[p[0]][p[1]] = p[2]
         self.update_dr_param(p[0], p[1], p[2])
+
 
         self.settings_index += 1
         self.piksi_framer(MsgSettingsReadByIndexReq(index=self.settings_index))
