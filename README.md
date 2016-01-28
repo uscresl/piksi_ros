@@ -16,6 +16,7 @@ Features:
 * Can publish TF transforms from UTM->base_station and/or base_station->rover
 * Supplies diagnostic info.
 * Keeps track of fix mode through watchdog timers.
+* Dynamic reconfigure support.
 
 Published Topics:
 -------
@@ -35,7 +36,12 @@ Piksi stuff:
 
 * **port** - The serial port device of the Piksi unit. *Default: /dev/ttyUSB0*.
 * **baud_rate** - Baud rate for the serial port
-* **piksi/setting_section/setting_name** - These can be used to change settings on the piksi at driver startup. Settings are not committed to device flash unless *piksi_save_settings* is set appropriately.
+
+Piksi hardware settings:
+
+You can have the driver set settings on the piksi at startup. Settings are not committed to device flash unless *piksi_save_settings* is set appropriately.
+
+* **piksi/SECTION/SETTING** - Possible SECTION and SETTING values can be found in Piksi documentation or in the piksi console.
 * **piksi_save_settings** - Commits piksi settings to device flash if set true. *Default: false*.
 
 Frames:
@@ -95,5 +101,4 @@ Todo:
 -----
 
 * Add/improve covariance estimate for published data.
-* Add dynamic reconfigure support
 * Rewrite in C++
