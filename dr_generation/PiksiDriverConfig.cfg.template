@@ -7,21 +7,23 @@ from dynamic_reconfigure.parameter_generator_catkin import *
 
 {{root_group}} = ParameterGenerator()
 
+piksi = {{root_group}}.add_group('piksi')
+
 {% for enum in enums %}
 {{ enum.name }} = {{root_group}}.enum([
 {% for field in enum.fields %}
-{{root_group}}.const("{{ field.name}}",      {{field.type}}, "{{field.value}}", "{{field.desc}}"),
+{{root_group}}.const("{{ field.name }}",      {{field.type}}, {{field.index}}, "{{field.desc}}"),
 {% endfor %}],
 "{{ enum.desc }}")
 {% endfor %}
 
 
 {% for group in groups %}
-{{ group.name }} = {{group.parent}}.add_group("{{ group.name }}")
+{{ group.name }} = piksi.add_group("{{ group.name }}")
 {% endfor %}
 
 {% for param in params %}
-{{param.group}}.add("{{param.name}}",            {{param.type}},   {{param.level}}, "{{ param.desc}}", {{ param.default}}{% if param.enum_name %}, edit_method={{param.enum_name}}{% endif %})
+{{param.group}}.add("piksi__{{param.group}}__{{param.name}}",            {{param.type}},   {{param.level}}, "{{ param.desc}}", default={{ param.default}}{% if param.enum_name %}, edit_method={{param.enum_name}}{% endif %}{% if param.max is defined %}, max={{param.max}}{% endif %}{% if param.min is defined %}, min={{param.min}}{% endif %})
 {% endfor %}
 
 exit(gen.generate(PACKAGE, "piksi_driver", "PiksiDriver"))

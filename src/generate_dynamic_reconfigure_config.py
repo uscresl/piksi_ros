@@ -18,6 +18,7 @@ import rospkg
 
 from dynamic_reconfigure.parameter_generator import *
 
+from collections import defaultdict
 
 rospack = rospkg.RosPack()
 PKG_PATH = rospack.get_path(PKG)
@@ -27,7 +28,9 @@ from jinja2 import FileSystemLoader, Environment
 env = Environment(loader=FileSystemLoader(os.path.join(PKG_PATH, 'dr_generation')))
 
 template = env.get_template('PiksiDriverConfig.cfg.template')
-print env
+
+def reformat_enum(s):
+    return s.strip().replace(" ","_").replace("(","_").replace(")","_")
 
 SKIP_EXPERT = True
 
@@ -40,6 +43,10 @@ TYPE_MAP = {
     'float': ('double_t', float),
     'string': ('str_t', str),
 }
+
+MINMAX = defaultdict(dict)
+MINMAX['double_t'] = {'min': sys.float_info.min, 'max': sys.float_info.max}
+MINMAX['int_t'] = {'min': -2147483647 - 1, 'max': 2147483647}
 
 ROOT_GROUP = 'gen'
 
@@ -73,11 +80,13 @@ if len(sys.argv) < 2:
 f = open(sys.argv[1], 'r')
 settings = yaml.load(f)
 
+limits = yaml.load(open(os.path.join(PKG_PATH, 'piksi_settings.yaml'), 'r'))
+
 groups = set()
 for s in settings:
     if s['group'] in IGNORE_GROUPS:
         continue
-
+    min_max = {}
     enum_name = None
 
     expert = False
@@ -103,9 +112,12 @@ for s in settings:
         elif s['type'].lower() == 'enum':
             enum_name = '%s_enum' % s['name']
             fields = []
+            index = 0
             for e in s['enumerated possible values'].split(','):
-                fields.append({'name':e.strip(), 'type': 'str_t', 'desc': e.strip(), 'value': e.strip()})
-            setting_type = TYPE_MAP['string']
+                name = reformat_enum(e)
+                fields.append({'name':name, 'type': 'int_t', 'desc': e.strip(), 'value': e.strip(), 'index': index})
+                index += 1
+            setting_type = TYPE_MAP['integer']
             output['enums'].append({'name': enum_name, 'fields': fields, 'desc': 'An enum for %s' % s['name']})
         else:
             print 'Skipping unknown type: %s' % s['type']
@@ -116,7 +128,31 @@ for s in settings:
 
     default = get_default(s['default value'], setting_type)
 
-    output['params'].append({'name': s['name'], 'default': repr(default), 'group': s['group'], 'type': setting_type[0], 'level': 0, 'desc': s['Description'].replace("\"","\\\""), 'enum_name': enum_name})
+    if enum_name:
+        default_found = False
+        for f in fields:
+            if f['value']==default:
+                default = f['index']
+                default_found = True
+        if not default_found:
+            default = fields[0]['index']
+            print 'Set default value of %s to %s' % (s['name'], default)
+
+
+    params = {'name': s['name'], 'default': repr(default), 'group': s['group'], 'type': setting_type[0], 'level': 0, 'desc': s['Description'].replace("\"","\\\""), 'enum_name': enum_name}
+    if not enum_name:
+        lims = MINMAX[setting_type[0]]
+        try:
+            for l in limits:
+                if l['group']==s['group'] and l['name']==s['name']:
+                    lims = {'min':l['min'], 'max':l['max']}
+                    break
+        except:
+            pass
+        params.update(lims)
+    else:
+        params.update({'min':0, 'max':len(fields)-1})
+    output['params'].append(params)
         # Add group to cfg
 
 output['root_group'] = ROOT_GROUP

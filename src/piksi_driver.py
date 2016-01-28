@@ -7,16 +7,22 @@ PKG = "piksi_ros"
 # Import system libraries
 import time
 import sys
+import os
 import socket
 import threading
 from collections import deque, defaultdict
+import yaml
+import ast
 
 # Import ROS libraries
 import rospy
 import roslib; roslib.load_manifest(PKG)
+import rospkg
 import diagnostic_updater
 import diagnostic_msgs
 import tf2_ros
+from dynamic_reconfigure.server import Server, extract_params
+
 
 # Import ROS messages
 from sensor_msgs.msg import NavSatFix, TimeReference, NavSatStatus
@@ -25,6 +31,7 @@ from geometry_msgs.msg import TransformStamped, Quaternion
 from diagnostic_msgs.msg import DiagnosticStatus
 
 from piksi_ros.msg import Observations, Obs, Ephemeris
+from piksi_ros.cfg import PiksiDriverConfig
 
 # Import SBP libraries
 from sbp.client.drivers.base_driver import BaseDriver
@@ -43,6 +50,85 @@ from sbp.settings import *
 from pyproj import Proj
 
 tree = lambda: defaultdict(tree)
+
+def pretty(d, indent=0):
+   for key, value in d.iteritems():
+      print '\t' * indent + str(key)
+      if isinstance(value, dict):
+         pretty(value, indent+1)
+      else:
+         print '\t' * (indent+1) + str(value)
+
+def extract_params_callback(config, parents=()):
+    res = []
+    for name, g in config.iteritems():
+        new_parents = parents+(g['name'],)
+        for p in g['parameters']:
+            res.append((new_parents, p, g['parameters'][p]))
+        res.extend(extract_params_callback(g['groups'], parents=new_parents))
+    return res
+
+"""
+About dynamic reconfigure for this driver.
+It turns out that dynamic reconfigure is one hell of a mess:
+- There are limitations on what you can name things, as names are used to generate variable names somewhere along the way.
+- While settings can be grouped in the DR config, the grouping acts only as a visual grouping, the parameters are not grouped onto the rosparam server but just saved to the nodes namespace (~param instead of ~group/param).
+- You can't have two parameters with the same name but in separate groups (because of the issue above).
+- Despite what the documentation says, you need to specify max/min for numeric values, if you don't then they will be set to some C++ method and config fails to load in python (probably works with C++ nodes though).
+- You can't specify a namespace prefix for your DR parameters.
+
+Because of these problems, we extend the DR server class to handle prefixes (see below).
+We also name the piksi settings parameters as piksi__section__param in DR because there are multiple params in different sections called 'mode' for example.
+On startup, the node will load parameters from ~piksi/ and set those settings on the Piksi unit. It will also update the ~dynamic_reconfigure/ namespace where we store the parameters.
+"""
+class GroupServer(Server):
+
+    def __init__(self, type, callback, ns_prefix=(), nest_groups=True):
+        self.ns_prefix = ns_prefix
+        self.nest_groups = nest_groups
+        super(GroupServer, self).__init__(type, callback)
+
+    def _get_param_name(self, parents, name):
+        if self.nest_groups:
+            return '~' + '/'.join(self.ns_prefix+parents+(name,))
+        else:
+            return '~' + '/'.join(self.ns_prefix+(name,))
+
+    def _get_config_name(self, parents, name):
+        #return '__'.join(parents+(name,))
+        return name
+
+    def _extract_param_tree(self, desc, parents=()):
+        res = []
+        for g in desc['groups']:
+            new_parents = parents+(g['name'],)
+            for p in g['parameters']:
+                res.append((new_parents, p))
+            res.extend(self._extract_param_tree(g, parents=new_parents))
+        return res
+
+    def _copy_from_parameter_server(self):
+
+        for parents, param in self._extract_param_tree(self.type.config_description):
+            try:
+                self.config[self._get_config_name(parents, param['name'])] = rospy.get_param(self._get_param_name(parents, param['name']))
+            except KeyError:
+                pass
+
+    def _copy_to_parameter_server(self):
+        for parents, param in self._extract_param_tree(self.type.config_description):
+            rospy.set_param(self._get_param_name(parents, param['name']), self.config[self._get_config_name(parents,param['name'])])
+
+    def _clamp(self, config):
+
+        for param in extract_params(self.type.config_description):
+            maxval = self.type.max[param['name']]
+            minval = self.type.min[param['name']]
+            val = config[param['name']]
+            if val > maxval and maxval != "":
+                config[param['name']] = maxval
+            elif val < minval and minval != "":
+                config[param['name']] = minval
 
 def calculate_utm_zone(lat, lon):
     """ Determine the UTM zone that a lon-lat point falls in. Returns and
@@ -150,6 +236,9 @@ class SerialReceiver(object):
     def callback(self, msg, **metadata):
         self._callback(msg, **metadata)
 
+rospack = rospkg.RosPack()
+PKG_PATH = rospack.get_path(PKG)
+
 GPS_EPOCH = time.mktime((1980, 1, 6, 0, 0, 0, 0, 0, 0))
 WEEK_SECONDS = 60*60*24*7
 
@@ -204,6 +293,8 @@ class PiksiROS(object):
         self.fix_mode = -1
         self.rtk_fix_mode = 2
 
+        self.read_piksi_settings_info()
+
         self.piksi_settings = tree()
 
         self.proj = None
@@ -250,8 +341,41 @@ class PiksiROS(object):
 
         self.setup_pubsub()
 
+    def read_piksi_settings_info(self):
+        self.piksi_settings_info = tree()
+        settings_info = yaml.load(open(os.path.join(PKG_PATH, 'piksi_settings.yaml'), 'r'))
+        for s in settings_info:
+
+            if s['type'].lower() == 'boolean':
+                s['parser'] = lambda x: x.lower()=='true'
+            elif s['type'].lower() in ('float', 'double','int'):
+                s['parser'] = ast.literal_eval
+            elif s['type'] == 'enum':
+                s['parser'] = s['enum'].index
+            else:
+                s['parser'] = lambda x: x
+
+            self.piksi_settings_info[s['group']][s['name']] = s
+
     def init_proj(self, latlon):
         self.proj = Proj(proj='utm',zone=calculate_utm_zone(*latlon)[0],ellps='WGS84')
+
+    def reconfig_callback(self, config, level):
+        for p,v in config.iteritems():
+            if p=='groups':
+                continue
+            n = p.split('__')
+            if self.piksi_settings[n[1]][n[2]] != v:
+                i = self.piksi_settings_info[n[1]][n[2]]
+                p_val = v
+                if i['type'] == 'enum':
+                    try:
+                        p_val = i['enum'][v]
+                    except:
+                        p_val = i['enum'][0]
+                self.piksi_set(n[1],n[2],p_val)
+                self.piksi_settings[n[1]][n[2]] = v
+        return config
 
     def read_params(self):
         self.debug = rospy.get_param('~debug', False)
@@ -350,6 +474,9 @@ class PiksiROS(object):
 
 
     def piksi_start(self):
+
+        self.dr_srv = GroupServer(PiksiDriverConfig, self.reconfig_callback, ns_prefix=('dynamic_reconfigure',), nest_groups=False)
+
         self.piksi.add_callback(self.callback_sbp_gps_time, msg_type=SBP_MSG_GPS_TIME)
         self.piksi.add_callback(self.callback_sbp_dops, msg_type=SBP_MSG_DOPS)
 
@@ -360,7 +487,8 @@ class PiksiROS(object):
         #if self.send_observations:
         self.piksi.add_callback(self.callback_sbp_obs, msg_type=SBP_MSG_OBS)
         self.piksi.add_callback(self.callback_sbp_base_pos, msg_type=SBP_MSG_BASE_POS)
-        self.piksi.add_callback(self.callback_sbp_ephemeris, msg_type=SBP_MSG_EPHEMERIS)
+        if self.publish_ephemeris:
+            self.piksi.add_callback(self.callback_sbp_ephemeris, msg_type=SBP_MSG_EPHEMERIS)
 
         if self.sbp_log is not None:
             self.sbp_logger = RotatingFileLogger(self.sbp_log, when='M', interval=60, backupCount=0)
@@ -404,6 +532,15 @@ class PiksiROS(object):
         self.piksi_framer(MsgSettingsReadByIndexReq(index=self.settings_index))
         #self.piksi_framer(MsgSettingsReadReq(setting='simulator\0enabled\0'))
 
+    def piksi_set(self, section, setting, value):
+        m = MsgSettingsWrite(setting="%s\0%s\0%s\0" % (section, setting, value))
+        self.piksi_framer(m)
+
+    def update_dr_param(self, section, name, value):
+        #print 'set %s:%s to %s' % (section, name, value)
+        #print '~dynamic_reconfigure/piksi__%s__%s' % (section, name), value
+        rospy.set_param('~dynamic_reconfigure/piksi__%s__%s' % (section, name), value)
+
     def set_piksi_settings(self):
         save_needed = False
         for s in nested_dict_iter(self.piksi_update_settings):
@@ -411,8 +548,8 @@ class PiksiROS(object):
             if len(cval) != 0:
                 if cval != str(s[1]):
                     rospy.loginfo('Updating piksi setting %s:%s to %s.' % (s[0][0], s[0][1], s[1]))
-                    m = MsgSettingsWrite(setting="%s\0%s\0%s\0" % (s[0][0], s[0][1], s[1]))
-                    self.piksi_framer(m)
+                    self.piksi_set(s[0][0], s[0][1], s[1])
+                    self.update_dr_param(s[0][0], s[0][1], s[1])
                     save_needed = True
                 else:
                     rospy.loginfo('Piksi setting %s:%s already set to %s.' % (s[0][0], s[0][1], s[1]))
@@ -667,7 +804,15 @@ class PiksiROS(object):
 
     def callback_sbp_settings_read_by_index_resp(self, msg, **metadata):
         p = msg.setting.split('\0')
+        try:
+            i = self.piksi_settings_info[p[0]][p[1]]
+            p[2] = i['parser'](p[2])
+        except:
+            pass
+
         self.piksi_settings[p[0]][p[1]] = p[2]
+        self.update_dr_param(p[0], p[1], p[2])
+
         self.settings_index += 1
         self.piksi_framer(MsgSettingsReadByIndexReq(index=self.settings_index))
 
