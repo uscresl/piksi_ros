@@ -649,21 +649,44 @@ class PiksiROS(object):
         pub.publish(out)
 
     def publish_odom(self):
-        if self.last_baseline is None or self.last_vel is None:
+        if self.last_vel is None:
             return
 
-        if self.last_baseline.tow == self.last_vel.tow:
-            self.odom_msg.header.stamp = rospy.Time.now()
+        self.odom_msg.header.stamp = rospy.Time.now()
 
+        self.odom_msg.twist.twist.linear.x = self.last_vel.e/1000.0
+        self.odom_msg.twist.twist.linear.y = self.last_vel.n/1000.0
+        self.odom_msg.twist.twist.linear.z = -self.last_vel.d/1000.0
+
+        # FIXME Not sure about this. Problem is that odom needs to be published whether RTK fix is active or not,
+        # but we won't get baseline callbacks unless RTK is active. So, which callback should initiate this publishing?
+        # If we do it only form VEL, then we never have the latest baseline IF baseline is actually sent by Piksi after
+        # the velocities.
+        # If we do it only from baseline, then we wouldn't publish when RTK is offline.
+        # Unfortunately we don't know instantaniously whether RTK is off or not, so if we relied on our timeout for that
+        # we'd get a break in publishing if we condition on that, but that logic would go:
+        # If RTK: publish only if last_baseline is current
+        # Else: publish no matter what
+        #
+        # The current solution might result in double odom messages being published, one with no position, followed immediately with one that has position.
+        # This may not be an issue depending on how downstream filters handle stuff.
+
+        if self.last_baseline.tow == self.last_vel.tow:
             self.odom_msg.pose.pose.position.x = self.last_baseline.e/1000.0
             self.odom_msg.pose.pose.position.y = self.last_baseline.n/1000.0
             self.odom_msg.pose.pose.position.z = -self.last_baseline.d/1000.0
+            self.odom_msg.pose.covariance[0] = self.rtk_h_accuracy**2
+            self.odom_msg.pose.covariance[7] = self.rtk_h_accuracy**2
+            self.odom_msg.pose.covariance[14] = self.rtk_v_accuracy**2
+        else:
+            self.odom_msg.pose.pose.position.x = 0
+            self.odom_msg.pose.pose.position.y = 0
+            self.odom_msg.pose.pose.position.z = 0
+            self.odom_msg.pose.covariance[0] = COV_NOT_MEASURED
+            self.odom_msg.pose.covariance[7] = COV_NOT_MEASURED
+            self.odom_msg.pose.covariance[14] = COV_NOT_MEASURED
 
-            self.odom_msg.twist.twist.linear.x = self.last_vel.e/1000.0
-            self.odom_msg.twist.twist.linear.y = self.last_vel.n/1000.0
-            self.odom_msg.twist.twist.linear.z = -self.last_vel.d/1000.0
-
-            self.pub_odom.publish(self.odom_msg)
+        self.pub_odom.publish(self.odom_msg)
 
     def callback_sbp_vel(self, msg, **metadata):
         if self.debug:
