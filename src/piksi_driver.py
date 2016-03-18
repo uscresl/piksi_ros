@@ -459,9 +459,9 @@ class PiksiROS(object):
             E,N = self.proj(msg.lon,msg.lat, inverse=False)
 
             self.transform.header.stamp = rospy.Time.now()
-            self.transform.translation.x = E
-            self.transform.translation.y = N
-            self.transform.translation.z = -msg.height
+            self.transform.transform.translation.x = E
+            self.transform.transform.translation.y = N
+            self.transform.transform.translation.z = -msg.height
             self.tf_br.sendTransform(self.transform)
 
     def fix_mode(self):
