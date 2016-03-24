@@ -303,8 +303,6 @@ class PiksiROS(object):
 
         self.read_params()
 
-        self.setup_comms()
-
         self.odom_msg = Odometry()
         self.odom_msg.header.frame_id = self.rtk_frame_id
         self.odom_msg.child_frame_id = self.child_frame_id
@@ -338,6 +336,14 @@ class PiksiROS(object):
         self.heartbeat_diag = diagnostic_updater.FrequencyStatus(diagnostic_updater.FrequencyStatusParam({'min':self.diag_heartbeat_freq, 'max':self.diag_heartbeat_freq}, self.diag_freq_tolerance, self.diag_window_size))
         self.diag_updater.add("Piksi status", self.diag)
         self.diag_updater.add(self.heartbeat_diag)
+
+        self.ext_msg_diag = None
+        if self.obs_udp_recv or self.obs_serial_recv:
+            self.ext_msg_diag = diagnostic_updater.FrequencyStatus(diagnostic_updater.FrequencyStatusParam({'min':self.diag_ext_msg_freq, 'max':self.diag_ext_msg_freq}, self.diag_freq_tolerance, self.diag_window_size))
+            self.diag_updater.add(self.ext_msg_diag)
+
+
+        self.setup_comms()
 
         self.setup_pubsub()
 
@@ -394,6 +400,9 @@ class PiksiROS(object):
         self.diag_window_size = rospy.get_param('~diag/window_size', 10)
         self.diag_min_delay = rospy.get_param('~diag/min_delay', 0.0)
         self.diag_max_delay = rospy.get_param('~diag/max_delay', 0.2)
+        self.diag_ext_msg_freq = rospy.get_param('~diag/ext_msg_freq', 10.0)
+        self.diag_warn_no_rtk = rospy.get_param('~diag/warn_no_rtk', True)
+
 
         # Send/receive observations through udp
         self.obs_udp_send = rospy.get_param('~obs/udp/send', False)
@@ -443,6 +452,9 @@ class PiksiROS(object):
     def callback_external(self, msg, **metadata):
         if self.debug:
             rospy.loginfo("Received external SBP msg.")
+
+        if self.ext_msg_diag:
+            self.ext_msg_diag.tick()
 
         if self.piksi_framer:
             self.piksi_framer(msg, **metadata)
@@ -904,7 +916,7 @@ class PiksiROS(object):
             stat.summary(DiagnosticStatus.ERROR, "Piksi not connected")
         elif fix_mode < 0:
             stat.summary(DiagnosticStatus.ERROR, "No fix")
-        elif fix_mode < 1:
+        elif fix_mode < 1 and self.diag_warn_no_rtk:
             stat.summary(DiagnosticStatus.WARN, "No RTK fix")
         elif num_sats < 5:
             stat.summary(DiagnosticStatus.WARN, "Low number of satellites in view")
